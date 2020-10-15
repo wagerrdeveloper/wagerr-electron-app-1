@@ -1,19 +1,16 @@
-import { BrowserWindow, Menu, app, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
 import ProgressBar from 'electron-progressbar';
 import fs from 'fs';
 import path from 'path';
+import axios from 'axios';
 import errors from './alerts/errors';
-import {
-  readWagerrConf,
-  rpcPass,
-  rpcUser,
-  testnet
-} from './blockchain/blockchain';
+import { readWagerrConf, rpcPass, rpcUser, testnet } from './blockchain/blockchain';
 import Daemon from './blockchain/daemon';
 import { spawnLogger } from './logger/logger';
 import menu from './menu/menu';
 import { checkForUpdates } from './updater/updater';
 import { version as appVersion } from '../../package.json';
+import snapshotHandler from './utils/snapshotHandler';
 
 const logger = spawnLogger();
 
@@ -33,18 +30,22 @@ let closeProgressBar = null;
 let forcelyQuit = false;
 
 // If in development mode use 'electron-debug' which adds useful debug features to the app.
-if (process.env.NODE_ENV === 'development') {
+if (process.env.NODE_ENV === 'development' || process.env.DEBUG_PROD === 'true') {
   require('electron-debug')();
 }
 
 // Install defined Electron/Chrome devtools extensions.
 const installExtensions = async () => {
-  const installer = require('electron-devtools-installer');
-  const extensions = ['VUEJS_DEVTOOLS'];
+  logger.debug('Installing Electron/Chrome devtools extensions');
 
-  return Promise.all(
-    extensions.map(name => installer.default(installer[name]))
-  ).catch(console.log);
+  const {
+    default: installExtension,
+    VUEJS_DEVTOOLS,
+  } = require('electron-devtools-installer');
+
+  installExtension(VUEJS_DEVTOOLS)
+    .then((name) => logger.debug(`Added devtools extension:  ${name}`))
+    .catch((err) => logger.error('An error occurred: ', err));
 };
 
 /**
@@ -75,6 +76,10 @@ async function createMainWindow() {
   // Add the main application menu to the UI.
   Menu.setApplicationMenu(menu);
 
+  if (process.env.NODE_ENV === 'development' || process.env.DEBUG_PROD === 'true') {
+    mainWindow.webContents.openDevTools();
+  }
+
   // Prepare for the window to be closed.
   mainWindow.on('close', async event => {
     if (closeWindowFlag === false && process.platform !== 'darwin') {
@@ -84,33 +89,58 @@ async function createMainWindow() {
       // mainWindow instead.
       if (daemon && !global.restarting) {
         // Prevent the default close action before daemon is completely stopped.
-        closeWindowFlag = true;
         event.preventDefault();
 
-        // Make the progress bar to show the status of close actions.
-        closeProgressBar = new ProgressBar({
-          text: 'Closing the Window...',
-          detail: 'Stopping Wagerr daemon...',
-          closeOnComplete: true
+        // Request renderer process if there are txs that haven't been confirmed
+        mainWindow.webContents.send('unconfirmed-txs-request');
+
+        // Receive answer from renderer process about unconfirmed txs
+        ipcMain.once('unconfirmed-txs-reply', async (event, hasUnconfirmedTxs) => {
+          if (!hasUnconfirmedTxs) {
+            closeWallet();
+          } else {
+            // In case of unconfirmed txs, request the user
+            const response = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+              type: 'question',
+              buttons: ['Confirm', 'Cancel'],
+              message: 'Are you sure?',
+              defaultId: 0,
+              cancelId: 1,
+              detail: `There are transactions that haven't been confirmed yet.`
+            });
+
+            if (!response.response) closeWallet();
+          }
         });
-
-        // Close the devtools window.
-        closeProgressBar._window.webContents.closeDevTools();
-
-        // Send the `stop` command to the daemon and wait for to shutdown.
-        await daemon.stop();
-
-        // Notify the user the daemon has shutdown.
-        closeProgressBar.detail = 'Wagger daemon stopped...';
-
-        // Close the shutdown progress bar window and quit the app.
-        setTimeout(() => {
-          closeProgressBar.close();
-          app.quit();
-        }, 1000);
       }
     }
   });
+
+  async function closeWallet() {
+    closeWindowFlag = true;
+
+    // Make the progress bar to show the status of close actions.
+    closeProgressBar = new ProgressBar({
+      text: 'Closing the Window...',
+      detail: 'Stopping Wagerr daemon...',
+      closeOnComplete: true
+    });
+
+    // Close the devtools window.
+    closeProgressBar._window.webContents.closeDevTools();
+
+    // Send the `stop` command to the daemon and wait for to shutdown.
+    await daemon.stop();
+
+    // Notify the user the daemon has shutdown.
+    closeProgressBar.detail = 'Wagger daemon stopped...';
+
+    // Close the shutdown progress bar window and quit the app.
+    setTimeout(() => {
+      closeProgressBar.close();
+      app.quit();
+    }, 1000);
+  }
 
   // The window is now closed.
   mainWindow.on('closed', async () => {
@@ -130,6 +160,7 @@ async function createMainWindow() {
 
     mainWindow.setTitle(title);
     mainWindow.show();
+
     setImmediate(() => {
       mainWindow.focus();
     });
@@ -195,8 +226,7 @@ app.on('ready', async () => {
   logger.info('Finished initializing and ready to start');
 
   // If running in development mode, install some Electron/Chrome devtools extensions like vue-devtools.
-  if (process.env.NODE_ENV === 'development') {
-    logger.debug('Installing Electron/Chrome devtools extensions');
+  if (process.env.NODE_ENV === 'development' || process.env.DEBUG_PROD === 'true') {
     await installExtensions();
   }
 
@@ -257,7 +287,7 @@ ipcMain.on('encrypt-wallet', async (event, arg) => {
  * Wallet repair main IPC handlers
  */
 ipcMain.on('salvage-wallet', async (event, arg) => {
-  const cancel = dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+  const response = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
     type: 'question',
     buttons: ['Confirm', 'Cancel'],
     message: 'Are you sure?',
@@ -266,7 +296,7 @@ ipcMain.on('salvage-wallet', async (event, arg) => {
     detail: 'Attempt to recover private keys from corrupt wallet.dat file.'
   });
 
-  if (!cancel) {
+  if (!response.response) {
     global.restarting = true;
 
     await daemon.stop().catch(function() {
@@ -279,7 +309,7 @@ ipcMain.on('salvage-wallet', async (event, arg) => {
 
 // Handles the render process of rescanning the locally stored blockchain.
 ipcMain.on('rescan-blockchain', async (event, arg) => {
-  const cancel = dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+  const response = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
     type: 'question',
     buttons: ['Confirm', 'Cancel'],
     message: 'Are you sure?',
@@ -288,7 +318,7 @@ ipcMain.on('rescan-blockchain', async (event, arg) => {
     detail: 'Rescan the block chain for missing transactions.'
   });
 
-  if (!cancel) {
+  if (!response.response) {
     global.restarting = true;
 
     await daemon.stop().catch(function() {
@@ -301,7 +331,7 @@ ipcMain.on('rescan-blockchain', async (event, arg) => {
 
 // Handles the render process of recovering transactions while keeping account info.
 ipcMain.on('recover-tx-1', async (event, arg) => {
-  const cancel = dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+  const response = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
     type: 'question',
     buttons: ['Confirm', 'Cancel'],
     message: 'Are you sure?',
@@ -311,7 +341,7 @@ ipcMain.on('recover-tx-1', async (event, arg) => {
       'Recover transactions from block chain, keep meta-data e.g. Account Owner.'
   });
 
-  if (!cancel) {
+  if (!response.response) {
     global.restarting = true;
 
     await daemon.stop().catch(function() {
@@ -324,7 +354,7 @@ ipcMain.on('recover-tx-1', async (event, arg) => {
 
 // Handles the render process of recovering transactions while dropping account info.
 ipcMain.on('recover-tx-2', async (event, arg) => {
-  const cancel = dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+  const response = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
     type: 'question',
     buttons: ['Confirm', 'Cancel'],
     message: 'Are you sure?',
@@ -333,7 +363,7 @@ ipcMain.on('recover-tx-2', async (event, arg) => {
     detail: 'Recover transactions from block chain, drop meta-data.'
   });
 
-  if (!cancel) {
+  if (!response.response) {
     global.restarting = true;
 
     await daemon.stop().catch(function() {
@@ -346,7 +376,7 @@ ipcMain.on('recover-tx-2', async (event, arg) => {
 
 // Handles the render process upgrading the wallet.
 ipcMain.on('upgrade-wallet', async (event, arg) => {
-  const cancel = dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+  const response = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
     type: 'question',
     buttons: ['Confirm', 'Cancel'],
     message: 'Are you sure?',
@@ -355,7 +385,7 @@ ipcMain.on('upgrade-wallet', async (event, arg) => {
     detail: 'Upgrade wallet to latest format on startup.'
   });
 
-  if (!cancel) {
+  if (!response.response) {
     global.restarting = true;
 
     await daemon.stop().catch(function() {
@@ -368,7 +398,7 @@ ipcMain.on('upgrade-wallet', async (event, arg) => {
 
 // Handles the render process of reindexing the locally stored blockchain.
 ipcMain.on('reindex-blockchain', async (event, arg) => {
-  const cancel = dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+  const response = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
     type: 'question',
     buttons: ['Confirm', 'Cancel'],
     message: 'Are you sure?',
@@ -377,7 +407,7 @@ ipcMain.on('reindex-blockchain', async (event, arg) => {
     detail: 'Rebuild block chain index from current blk000??.dat files'
   });
 
-  if (!cancel) {
+  if (!response.response) {
     global.restarting = true;
 
     await daemon.stop().catch(function() {
@@ -390,7 +420,7 @@ ipcMain.on('reindex-blockchain', async (event, arg) => {
 
 // Handles the render process of rescanning the locally stored blockchain.
 ipcMain.on('resync-blockchain', async (event, arg) => {
-  const cancel = dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+  const response = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
     type: 'question',
     buttons: ['Confirm', 'Cancel'],
     message: 'Are you sure?',
@@ -399,7 +429,7 @@ ipcMain.on('resync-blockchain', async (event, arg) => {
     detail: 'Delete local block chain so wallet synchronises from scratch.'
   });
 
-  if (!cancel) {
+  if (!response.response) {
     global.restarting = true;
 
     await daemon.stop().catch(function() {
@@ -412,7 +442,7 @@ ipcMain.on('resync-blockchain', async (event, arg) => {
 
 // Handles the render process of resyncing the blockchain.
 ipcMain.on('restart-wagerrd', async (event, arg) => {
-  const cancel = dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+  const response = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
     type: 'question',
     buttons: ['Confirm', 'Cancel'],
     message: 'Are you sure?',
@@ -421,15 +451,27 @@ ipcMain.on('restart-wagerrd', async (event, arg) => {
     detail: 'Restart the Wagerr Wallet.'
   });
 
-  if (!cancel) {
-    global.restarting = true;
-
-    await daemon.stop().catch(function() {
-      logger.warn('wagerrd may not have shutdown correctly.');
-    });
-    await mainWindow.close();
-    await init(arg);
+  if (!response.response) {
+    restartWagerrd(arg);
   }
+});
+
+ipcMain.on('restart-wagerrd-force', async (event, arg) => {
+  restartWagerrd();
+});
+
+async function restartWagerrd(arg) {
+  global.restarting = true;
+
+  await daemon.stop().catch(function() {
+    logger.warn('wagerrd may not have shutdown correctly.');
+  });
+  await mainWindow.close();
+  await init(arg);
+}
+
+ipcMain.on('stop-daemon', async (event, arg) => {
+  event.returnValue = await daemon.stop();
 });
 
 // Send the RPC username to the render process.
@@ -449,4 +491,47 @@ ipcMain.on('no-peers', () => {
 
 ipcMain.on('log-message', (event, ...args) => {
   logger.log(...args);
+});
+
+ipcMain.on('snapshot-download', async (event, url) => {
+  const { CancelToken } = axios;
+  const source = CancelToken.source();
+  let progressPercentage = 0;
+  let snapshotPath = '';
+  let progress = 0;
+  let total = 0;
+
+  const interval = setInterval(function () {
+    mainWindow.webContents.send('snapshot-download-progress', progressPercentage);
+  }, 1000);
+
+  const response = await axios({
+    method: 'get',
+    url,
+    responseType: 'stream',
+    cancelToken: source.token,
+  });
+
+  total = response.headers['content-length'];
+  snapshotPath = snapshotHandler.resolveSnapshotDataPath(response);
+  mainWindow.webContents.send('snapshot-download-path', snapshotPath);
+  response.data.pipe(fs.createWriteStream(snapshotPath));
+
+  response.data.on('data', (chunk) => {
+    progress += chunk.length;
+    progressPercentage = (progress / total) * 100;
+  });
+
+  response.data.on('end', () => {
+    try {
+      clearInterval(interval);
+      mainWindow.webContents.send('snapshot-download-complete');
+    } catch (err) {
+      mainWindow.webContents.send('snapshot-download-error', err);
+    }
+  });
+
+  ipcMain.on('snapshot-download-cancel', () => {
+    source.cancel('Snapshot download canceled by the user.');
+  });
 });

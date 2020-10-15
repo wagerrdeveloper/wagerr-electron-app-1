@@ -17,8 +17,10 @@ const OddsFormat = {
 
 const state = function() {
   return {
-    timezone: moment.tz.guess(),
     oddsFormat: OddsFormat.decimal,
+    passwordOnStartup: true,
+    timezoneOption: 'auto',
+    timezone: moment.tz.guess(),
     showNetworkShare: false,
     accountList: [],
     receivingAddressList: [],
@@ -40,6 +42,9 @@ const displayOdds = function(state, val) {
 };
 
 const getters = {
+  getTimezoneOption: state => {
+    return state.timezoneOption;
+  },
   getTimezone: state => {
     return state.timezone;
   },
@@ -57,6 +62,9 @@ const getters = {
       val = val * 0.94 + 10000; // to correct decimal
     }
     return displayOdds(state, val);
+  },
+  getPasswordOnStartup: state => {
+    return !!state.passwordOnStartup;
   },
   getShowNetworkShare: state => {
     return state.showNetworkShare;
@@ -78,6 +86,16 @@ const actions = {
     preferencesStore.set('oddsFormat', state.oddsFormat);
   },
 
+  updateTimezoneOption({ commit, state }, timezoneOption) {
+    commit('setTimezoneOption', timezoneOption);
+    preferencesStore.set('timezoneOption', state.timezoneOption);
+  },
+
+  updateTimezone({ commit, state }, timezone) {
+    commit('setTimezone', timezone);
+    preferencesStore.set('timezone', state.timezone);
+  },
+
   // Loaded on Splash screen
   loadUserSettings({ dispatch, getters }, networkType) {
     const network = networkType === 'Testnet' ? '_testnet' : '';
@@ -87,6 +105,27 @@ const actions = {
     if (preferencesStore.has('oddsFormat')) {
       dispatch('updateOddsFormat', Number(preferencesStore.get('oddsFormat')));
     }
+    if (preferencesStore.has('timezone')) {
+      dispatch('updateTimezone', preferencesStore.get('timezone'));
+    }
+    if (preferencesStore.has('timezoneOption')) {
+      // On launch and after setting the timezone value from the preferences
+      // file, check if the timezone option preference is set to 'auto'. If it
+      // is update the timezone value with a new guess at which timezone the
+      // user is in. This solves the problem of a laptop user moving across
+      // timezones or DST starting/ending.
+      let tzOption = preferencesStore.get('timezoneOption');
+      dispatch('updateTimezoneOption', tzOption);
+      if (tzOption === 'auto') {
+        dispatch('updateTimezone', moment.tz.guess());
+      }
+    }
+    if (preferencesStore.has('passwordOnStartup')) {
+      dispatch(
+        'updatePasswordOnStartup',
+        Number(preferencesStore.get('passwordOnStartup'))
+      );
+    }
     if (preferencesStore.has('showNetworkShare')) {
       dispatch(
         'updateShowNetworkShare',
@@ -95,8 +134,16 @@ const actions = {
     }
   },
 
+  togglePasswordOnStartup({ commit, state }) {
+    commit('setPasswordOnStartup', !state.passwordOnStartup);
+  },
+
   toggleShowNetworkShare({ commit, state }) {
     commit('setShowNetworkShare', !state.showNetworkShare);
+  },
+
+  updatePasswordOnStartup({ commit, state }, value) {
+    commit('setPasswordOnStartup', value);
   },
 
   updateShowNetworkShare({ commit, state }, value) {
@@ -214,7 +261,16 @@ const mutations = {
   setOddsFormat(state, format) {
     state.oddsFormat = format;
   },
-
+  setTimezoneOption(state, timezoneOption) {
+    state.timezoneOption = timezoneOption;
+  },
+  setTimezone(state, timezone) {
+    state.timezone = timezone;
+  },
+  setPasswordOnStartup(state, value) {
+    state.passwordOnStartup = value;
+    preferencesStore.set('passwordOnStartup', state.passwordOnStartup);
+  },
   setShowNetworkShare(state, value) {
     state.showNetworkShare = value;
     preferencesStore.set('showNetworkShare', state.showNetworkShare);

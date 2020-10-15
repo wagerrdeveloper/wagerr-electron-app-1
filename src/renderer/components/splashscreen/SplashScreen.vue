@@ -22,6 +22,13 @@
         </div>
       </div>
 
+      <download-snapshot
+        v-if="mayDownloadSnapshot && getNetworkType !== 'Testnet'"
+        :sync-method="syncMethod"
+        :time-behind-text="timeBehindText"
+        v-on:update-sync-method="updateSyncMethod"
+      />
+
       <div class="splash-wallet-repair text-center">
         <div>
           <a href="#" @click="restartWallet">Restart Wallet</a>
@@ -48,52 +55,51 @@
 </template>
 
 <script>
-import { shell } from 'electron';
+import { remote, shell } from 'electron';
 import moment from 'moment';
 import { path } from 'path';
+import fs from 'fs';
 import { mapActions, mapGetters } from 'vuex';
 import blockchainRPC from '../../services/api/blockchain_rpc';
 import networkRPC from '../../services/api/network_rpc';
 import ipcRenderer from '../../../common/ipc/ipcRenderer';
 import { getWagerrConfPath } from '../../../main/blockchain/blockchain';
+import DownloadSnapshot from './DownloadSnapshot.vue';
+import { blockchainSnapshot, syncMethods } from '../../../main/constants/constants';
+
 
 export default {
   name: 'SplashScreen',
+  components: { DownloadSnapshot },
 
   data() {
     return {
-      confPath: getWagerrConfPath()
+      confPath: getWagerrConfPath(),
+      syncMethod: syncMethods.SCAN_BLOCKS,
+      timeBehindText: '',
+      mayDownloadSnapshot: false
     };
   },
 
   computed: {
     ...mapGetters([
-      'balance',
+      'getNetworkType',
       'initText',
-      'walletLoaded',
-      'walletSynced',
-      'walletUnlocked',
       'walletVersion'
     ])
   },
 
   methods: {
     ...mapActions([
-      'syncWallet',
-      'updateInfo',
-      'updateBlocks',
       'updateInitText',
       'updateNetworkType',
       'updateWalletLoaded',
-      'updateWalletSynced',
-      'updateNumMasternodes',
-      'updateNumConnections',
       'walletExtendedBalance',
-      'getWGRTransactionList',
-      'getPLBetTransactionList',
+      'getMyBetsTransactionList',
       'getCGBetTransactionList',
       'getWGRTransactionRecords',
-      'loadUserSettings'
+      'loadUserSettings',
+      'walletInfo'
     ]),
 
     rescanBlockchain: function() {
@@ -116,44 +122,25 @@ export default {
       ipcRenderer.closeWallet();
     },
 
-    getTimeBehindText: function(seconds, blockHeight) {
-      const HOUR_IN_SECONDS = 60 * 60;
-      const DAY_IN_SECONDS = 24 * 60 * 60;
-      const WEEK_IN_SECONDS = 7 * 24 * 60 * 60;
-      const YEAR_IN_SECONDS = 31556952; // Average length of year in Gregorian calendar.
+    updateSyncMethod: function(syncMethod) {
+      this.syncMethod = syncMethod;
+    },
 
+    getTimeBehindText: function(durationBehind) {
       let timeBehindText;
-      let years;
-      let remainder;
 
-      if (Math.round(seconds / HOUR_IN_SECONDS) === 0) {
-        // Wallet is synced enough to allow user access.
-        this.updateWalletLoaded(true);
-      } else if (seconds < 2 * DAY_IN_SECONDS) {
-        timeBehindText =
-          Math.round(seconds / HOUR_IN_SECONDS) +
-          ' hours behind, Scanning block ' +
-          blockHeight;
-      } else if (seconds < 2 * WEEK_IN_SECONDS) {
-        timeBehindText =
-          Math.round(seconds / DAY_IN_SECONDS) +
-          ' days behind, Scanning block ' +
-          blockHeight;
-      } else if (seconds < YEAR_IN_SECONDS) {
-        timeBehindText =
-          Math.round(seconds / WEEK_IN_SECONDS) +
-          ' weeks behind, Scanning block ' +
-          blockHeight;
+      if (durationBehind.asDays() < 2) {
+        timeBehindText = `${Math.ceil(durationBehind.asHours())} hours behind`;
+
+      } else if (durationBehind.asWeeks() < 2) {
+        timeBehindText = `${Math.ceil(durationBehind.asDays())} days behind`;
+
+      } else if (durationBehind.asYears() < 1) {
+        timeBehindText = `${Math.ceil((durationBehind.asWeeks()))}  weeks behind`;
+
       } else {
-        years = seconds / YEAR_IN_SECONDS;
-        remainder = seconds % YEAR_IN_SECONDS;
-
-        timeBehindText =
-          Math.round(years) +
-          ' year and ' +
-          Math.round(remainder / WEEK_IN_SECONDS) +
-          ' weeks behind, Scanning block ' +
-          blockHeight;
+        const weeksBehind = Math.ceil(durationBehind.asWeeks() - moment.duration(durationBehind.years(), 'years').asWeeks());
+        timeBehindText = `${durationBehind.years()} year and ${weeksBehind} weeks behind`;
       }
 
       return timeBehindText;
@@ -195,8 +182,8 @@ export default {
           return 1;
         }
 
-        // Sleep for 1 second between loops to lessen the burden on contiously making calls to the daemon and updating the UI.
-        await this.sleep(1000);
+        // Sleep for 15 seconds between loops to lessen the burden on contiously making calls to the daemon and updating the UI.
+        await this.sleep(15000);
       }
 
       // Once peers have been found resolve the Promise.
@@ -206,38 +193,57 @@ export default {
       }
     },
 
+    // Check for daemon initialized
+    checkDaemonInitialized: async function() {
+      this.updateInitText('Initializing daemon... this may take some time!');
+      ipcRenderer.log('info', 'Waiting for daemon to initialize');
+
+      // wait 50 seconds + 10 previous seconds => 1 minute so daemon can initialize
+      await this.sleep(50000);
+
+      // While no peers have connected to the daemon keep looping.
+      while (true) {
+        let netInfo = (await networkRPC.getInfo()).result;
+
+        // If we have successfully connected to peers break out of the loop.
+        if (netInfo.blocks !== -1) {
+          ipcRenderer.log('info', 'Daemon initialized');
+          break;
+        }
+
+        // Sleep for 20 second between loops to lessen the burden on contiously making calls to the daemon and updating the UI.
+        await this.sleep(20000);
+      }
+    },
+
     // Show the blockchain sync status information.
     syncBlockchainStatus: async function() {
-      let bestBlockHash;
-      let bestBlockHeight;
-      let bestBlockTime;
-      let bestBlockTimeDifference;
-      let synced = false;
-      let verificationProgress;
-
+      let blockchainInfo, durationBehind, synced = false;
       ipcRenderer.log('info', 'Syncing blockchain');
 
       while (!synced) {
-        let blockchainInfo = await blockchainRPC.getBlockchainInfo();
-        bestBlockHash = blockchainInfo.bestblockhash;
-        bestBlockHeight = blockchainInfo.blocks;
-        verificationProgress = blockchainInfo.verificationprogress;
+        if (this.syncMethod === syncMethods.SCAN_BLOCKS) {
+          blockchainInfo = await blockchainRPC.getBlockchainInfo();
+          durationBehind = await blockchainRPC.getBlockDurationBehind(blockchainInfo.bestblockhash);
 
-        let blockInfo = await blockchainRPC.getBlockInfo(bestBlockHash);
-        bestBlockTime = blockInfo.time;
-        bestBlockTimeDifference = moment().diff(
-          bestBlockTime * 1000,
-          'seconds'
-        );
+          // If less than half an hour behind
+          if (Math.round(durationBehind.asHours()) === 0) {
+            // Wallet is synced enough to allow user access.
+            this.loadWallet();
 
-        let timeBehindText = this.getTimeBehindText(
-          bestBlockTimeDifference,
-          bestBlockHeight
-        );
-        this.updateInitText(timeBehindText);
+          } else {
+            this.timeBehindText = this.getTimeBehindText(durationBehind);
+
+            this.updateInitText(this.timeBehindText + ', Scanning block ' + blockchainInfo.blocks);
+
+            // TODO: Re-enable after v4 testing.
+            // let weeksBehind = Math.ceil(durationBehind.asWeeks());
+            // this.mayDownloadSnapshot = weeksBehind > blockchainSnapshot.TRESHOLD_IN_WEEKS;
+          }
+        }
 
         // If verification progress is 1 or above it means the daemon is synced.
-        if (verificationProgress >= 1) {
+        if (blockchainInfo.verificationprogress >= 1) {
           synced = true;
           break;
         }
@@ -257,6 +263,21 @@ export default {
     onOpenConf: function() {
       ipcRenderer.log('debug', 'Opening wagerr.conf file');
       shell.openItem(this.confPath);
+    },
+
+    async loadWallet() {
+      // After connecting to peers get some blockchain info.
+      this.updateInitText('Fetching wallet information...');
+      await this.walletInfo();
+      await this.getWGRTransactionRecords(100);
+      // TODO: Wagerr Core has a bug where you can't fetch bets until wallet unencrypted. This
+      //       causes encrypted wallets to not get passed the loading screen. Disable until fixed
+      //       in Core.
+      // await this.getMyBetsTransactionList(50);
+      await this.getCGBetTransactionList(25);
+      await this.walletExtendedBalance();
+
+      this.updateWalletLoaded(true);
     }
   },
 
@@ -265,8 +286,10 @@ export default {
     // launch. If we start hitting it with RPC calls too early the app might
     // fail to launch in some instances. Dirty workaround to allow 10 seconds
     // before moving to the RPC calls.
-    // TODO: Implement a cleaner solution.
     await this.sleep(10000);
+
+    // Wait for the daemon to be initialized
+    await this.checkDaemonInitialized();
 
     // Check if connected to the Wagerr network and if we have peers.
     await this.checkPeerStatus();
@@ -274,20 +297,12 @@ export default {
     // Set the network.
     let blockchainInfo = await blockchainRPC.getBlockchainInfo();
     let network = blockchainInfo.chain === 'test' ? 'Testnet' : 'Mainnet';
+    // load User Config - could use methods access, instead of store.dispatch
+    await this.loadUserSettings(network);
     await this.updateNetworkType(network);
 
     // If Wallet not synced show time behind text.
     await this.syncBlockchainStatus();
-
-    // After connecting to peers get some blockchain info.
-    this.updateInitText('Fetching wallet information...');
-    await this.walletExtendedBalance();
-    await this.getWGRTransactionRecords(100);
-    await this.getPLBetTransactionList(50);
-    await this.getCGBetTransactionList(25);
-
-    // load User Config - could use methods access, instead of store.dispatch
-    await this.loadUserSettings(network);
   }
 };
 </script>

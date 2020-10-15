@@ -177,6 +177,7 @@
 <script>
 import Vuex from 'vuex';
 import moment from 'moment';
+import blockchainRPC from '@/services/api/blockchain_rpc';
 
 export default {
   name: 'Information',
@@ -204,7 +205,7 @@ export default {
     ...Vuex.mapActions([
       'updateBlocks',
       'walletInfo',
-      'updateInfo',
+      'getInfo',
       'updateStakingStatus',
       'updateNumMasternodes',
       'updateChainSyncStatus'
@@ -229,29 +230,34 @@ export default {
         '.' +
         buildVersion
       );
+    },
+
+    getLastBlockTime: async function() {
+      return moment(await blockchainRPC.getBlockTime()).format('MMM Do YYYY, h:mm:ss a');
     }
   },
 
-  created() {
+  async created() {
     this.blockCount = this.getBlocks;
+    this.lastBlockTime = await this.getLastBlockTime();
 
     this.walletInfo();
-    this.updateInfo();
+    this.getInfo();
     this.updateStakingStatus();
     this.updateNumMasternodes();
     this.updateChainSyncStatus();
 
     this.timeout = setInterval(
-      function() {
+      async function() {
         this.walletInfo();
-        this.updateInfo();
+        this.getInfo();
         this.updateStakingStatus();
         this.updateNumMasternodes();
         this.updateChainSyncStatus();
 
         if (this.blockCount !== this.getBlocks) {
           this.blockCount = this.getBlocks;
-          this.lastBlockTime = moment().format('MMM Do YYYY, h:mm:ss a');
+          this.lastBlockTime = await this.getLastBlockTime()
         }
       }.bind(this),
       3000
@@ -262,7 +268,7 @@ export default {
     return {
       timeout: 0,
       blockCount: 0,
-      lastBlockTime: moment().format('MMM Do YYYY, h:mm:ss a')
+      lastBlockTime: ''
     };
   },
 

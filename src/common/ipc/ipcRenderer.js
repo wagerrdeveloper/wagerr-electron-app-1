@@ -1,4 +1,5 @@
-const { ipcRenderer } = require('electron');
+import { ipcRenderer } from 'electron';
+import transactionsRPC from '../../renderer/services/api/transactions_rpc';
 
 function log(level, message) {
   ipcRenderer.send('log-message', level, message);
@@ -45,9 +46,33 @@ function restartWallet() {
   ipcRenderer.send('restart-wagerrd');
 }
 
+function restartWalletForce() {
+  console.log('ipc renderer');
+  ipcRenderer.send('restart-wagerrd-force');
+}
+
 function noPeers() {
   ipcRenderer.send('no-peers');
 }
+
+async function stopDaemon() {
+  const res = await ipcRenderer.sendSync('stop-daemon');
+  console.log('Daemon has stopped with res: ' + res);
+  return res;
+}
+
+function snapshotDownload(url) {
+  ipcRenderer.send('snapshot-download', url);
+}
+
+function snapshotDownloadCancel() {
+  ipcRenderer.send('snapshot-download-cancel');
+}
+
+ipcRenderer.on('unconfirmed-txs-request', async (event, arg) => {
+  const hasUnconfirmedTransactions = await transactionsRPC.hasUnconfirmedTransactions();
+  event.sender.send('unconfirmed-txs-reply', hasUnconfirmedTransactions);
+});
 
 export default {
   log,
@@ -60,6 +85,10 @@ export default {
   reindexBlockchain,
   resyncBlockchain,
   restartWallet,
+  restartWalletForce,
   noPeers,
-  runCommand
+  runCommand,
+  stopDaemon,
+  snapshotDownload,
+  snapshotDownloadCancel
 };

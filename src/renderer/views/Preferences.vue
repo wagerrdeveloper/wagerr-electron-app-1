@@ -11,8 +11,7 @@
                 <tr class="info-row">
                   <td>Odds Display</td>
                   <td class="aligncenter">
-                    <div id="oddsChoice">
-                      <form id="oddschoiceform" action="#" @submit.prevent>
+                    <div class="inline">
                         <p>
                           <label>
                             <input
@@ -58,7 +57,70 @@
                             <span>American</span>
                           </label>
                         </p>
-                      </form>
+                      <br />
+                    </div>
+                  </td>
+                </tr>
+                <tr class="info-row">
+                  <td>Timezone</td>
+                  <td class="aligncenter">
+                    <div class="inline">
+                        <p>
+                          <label>
+                            <input
+                              name="timezoneOption"
+                              type="radio"
+                              value="auto"
+                              @change="changeTimezoneOption"
+                              :checked="getTimezoneOption === 'auto'"
+                            />
+                            <span>Auto-detect</span>
+                          </label>
+                        </p>
+                        <p>
+                          <label>
+                            <input
+                              name="timezoneOption"
+                              type="radio"
+                              value="fixed"
+                              @change="changeTimezoneOption"
+                              :checked="getTimezoneOption === 'fixed'"
+                            />
+                            <span>Fixed</span>
+                          </label>
+                        </p>
+                        <select
+                          class="browser-default timezone"
+                          :disabled="getTimezoneOption === 'auto'"
+                          @change="changeTimezone"
+                        >
+                            <option v-for="tz in timezones" :selected="tz === getTimezone" :key="tz">
+                              {{ tz }}
+                            </option>
+                        </select>
+                      <br />
+                    </div>
+                  </td>
+                </tr>
+                <tr v-if="walletEncrypted" class="info-row">
+                  <td>
+                    Always ask for password on startup
+                  </td>
+                  <td class="aligncenter">
+                    <div id="show-network-share-choice">
+                      <p>
+                        <label>
+                          <input
+                            name="passwordOnStartup"
+                            type="checkbox"
+                            id="passwordOnStartup"
+                            :value="getPasswordOnStartup"
+                            @change="togglePasswordOnStartup"
+                            :checked="getPasswordOnStartup"
+                          />
+                          <span style="padding-left: 0px;"></span>
+                        </label>
+                      </p>
                       <br />
                     </div>
                   </td>
@@ -107,18 +169,57 @@
 
 <script>
 import { remote, shell } from 'electron';
-import Store from 'electron-store';
 import { mapGetters, mapActions } from 'vuex';
 import wagerrRPC from '@/services/api/wagerrRPC';
 import { getWagerrConfPath } from '../../main/blockchain/blockchain';
+import moment from 'moment';
 
 export default {
   name: 'Preferences',
 
+  data: function() {
+    return {
+      confPath: getWagerrConfPath()
+    };
+  },
+
+  computed: {
+    ...mapGetters([
+      'getOddsFormats',
+      'getOddsFormat',
+      'getTimezoneOption',
+      'getTimezone',
+      'getShowNetworkShare',
+      'getPasswordOnStartup',
+      'walletEncrypted'
+    ]),
+
+    'timezones': function() {
+      return moment.tz.names();
+    }
+  },
+
   methods: {
-    ...mapActions(['updateOddsFormat', 'toggleShowNetworkShare']),
+    ...mapActions(['updateOddsFormat', 'toggleShowNetworkShare', 'togglePasswordOnStartup']),
+
     changeOddsFormat: function(event) {
       this.$store.dispatch('updateOddsFormat', Number(event.target.value));
+    },
+
+    changeTimezoneOption: function(event) {
+      const timezoneOption = event.target.value;
+      this.$store.dispatch('updateTimezoneOption', timezoneOption);
+
+      if (timezoneOption === 'auto') {
+        this.$store.dispatch('updateTimezone', moment.tz.guess());
+      } else if (timezoneOption === 'fixed') {
+        this.$store.dispatch('updateTimezone', this.getTimezone);
+      }
+    },
+
+    changeTimezone: function(event) {
+      const newTimezone = event.target.value;
+      this.$store.dispatch('updateTimezone', newTimezone);
     },
 
     oddsFormatChecked: function(format) {
@@ -129,8 +230,8 @@ export default {
       shell.openItem(this.confPath);
     },
 
-    backupWallet: function() {
-      let folderPath = remote.dialog.showOpenDialog({
+    backupWallet: async function() {
+      const folderPath = await remote.dialog.showOpenDialog({
         title: 'Backup Wallet.dat file.',
         buttonLabel: 'Select Folder',
         properties: ['openDirectory'],
@@ -139,15 +240,15 @@ export default {
         defaultId: 0
       });
 
-      if (folderPath) {
+      if (folderPath.filePaths[0]) {
         wagerrRPC.client
-          .backupWallet(folderPath)
+          .backupWallet(folderPath.filePaths[0])
           .then(function(resp) {
             console.log(resp);
             M.toast({
               html:
                 '<span class="toast__bold-font">Success &nbsp;</span> Wallet backup up located here: ' +
-                folderPath,
+                folderPath.filePaths[0],
               classes: 'green'
             });
           })
@@ -157,16 +258,6 @@ export default {
           });
       }
     }
-  },
-
-  computed: {
-    ...mapGetters(['getOddsFormats', 'getOddsFormat', 'getShowNetworkShare'])
-  },
-
-  data: function() {
-    return {
-      confPath: getWagerrConfPath()
-    };
   }
 };
 </script>
@@ -228,9 +319,13 @@ export default {
     border-right: 2px solid $wagerr-red;
     border-bottom: 2px solid $wagerr-red;
   }
-  #oddschoiceform p {
+  div.inline p {
     display: inline-block;
     padding: 0 10px;
+  }
+  select.timezone {
+    max-width: 300px;
+    margin: auto;
   }
 }
 </style>

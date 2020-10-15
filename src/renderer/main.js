@@ -16,8 +16,13 @@ import locale from 'element-ui/lib/locale/lang/en';
 import 'materialize-css/dist/css/materialize.css'
 import 'materialize-css/dist/js/materialize.js'
 
+import PerfectScrollbar from 'vue2-perfect-scrollbar'
+import 'vue2-perfect-scrollbar/dist/vue2-perfect-scrollbar.css'
+
 // Import global styles
 import './assets/scss/main.scss';
+
+Vue.use(PerfectScrollbar);
 
 Vue.use(ElementUI, { locale });
 
@@ -32,6 +37,15 @@ Vue.use(VueClipboards);
 
 // Inject the vee form validation JS lib.
 Vue.use(VeeValidate);
+
+// Initializes the materializecss components of a Vue component
+Vue.prototype.$initMaterialize = function(toWatch) {
+  let modals = this.$el.querySelectorAll('.modal:not(.no-auto-init)');
+  M.Tabs.init(this.$el.querySelector('.tabs'));
+  M.Dropdown.init(this.$el.querySelectorAll('.dropdown-trigger'));
+  M.Tooltip.init(this.$el.querySelectorAll('.tooltipped'));
+  M.Modal.init(modals);
+}
 
 new Vue({
   router,
